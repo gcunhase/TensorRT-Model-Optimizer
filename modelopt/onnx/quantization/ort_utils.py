@@ -168,6 +168,9 @@ def update_trt_ep_support(
             trt_plugins = []
         return trt_plugins
 
+    if not has_custom_op:
+        trt_plugins = None
+
     if has_dds_op:
         if "trt" in calibration_eps:
             try:
