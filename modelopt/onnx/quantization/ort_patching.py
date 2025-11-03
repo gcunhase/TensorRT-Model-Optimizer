@@ -67,6 +67,7 @@ from onnxruntime.quantization.calibrate import (
     TensorData,
     TensorsData,
 )
+from onnxruntime.quantization.onnx_quantizer import ONNXQuantizer
 from onnxruntime.quantization.qdq_quantizer import QDQQuantizer
 from onnxruntime.quantization.quant_utils import (
     QuantFormat,
@@ -518,8 +519,8 @@ def _collect_data_minmax_calibrator(calibrator, data_reader: CalibrationDataRead
             calibrator.infer_session.run(None, inputs, run_options=run_options)
         )
 
-        # ======== Modification: block is indentend in ========
-        if len(calibrator.intermediate_outputs) == 0:
+        # ======== Modification: block is indented in ========
+        if len(calibrator.intermediate_outputs) == 0 and calibrator.calibrate_tensors_range is None:
             raise ValueError("No data is collected.")
 
         t = calibrator.compute_data()
@@ -1481,6 +1482,7 @@ def _create_calibrator_with_extra_options(
         moving_average = extra_options.get("moving_average", False)
         averaging_constant = extra_options.get("averaging_constant", 0.01)
         max_intermediate_outputs = extra_options.get("max_intermediate_outputs", None)
+        per_channel = extra_options.get("per_channel", False)
         calibrator = MinMaxCalibrater(
             model,
             op_types_to_calibrate,
@@ -1490,6 +1492,7 @@ def _create_calibrator_with_extra_options(
             moving_average=moving_average,
             averaging_constant=averaging_constant,
             max_intermediate_outputs=max_intermediate_outputs,
+            per_channel=per_channel,
         )
     elif calibrate_method == CalibrationMethod.Entropy:
         # default settings for entropy algorithm
@@ -1658,7 +1661,7 @@ def _quantize_static(
     check_static_quant_arguments(quant_format, activation_type, weight_type)
 
     if quant_format is QuantFormat.QOperator:
-        quantizer = QDQQuantizer(
+        quantizer = ONNXQuantizer(
             model,
             per_channel,
             reduce_range,
