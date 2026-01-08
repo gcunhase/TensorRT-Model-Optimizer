@@ -808,3 +808,33 @@ def remove_node_training_mode(onnx_model: onnx.ModelProto, node_op_type: str) ->
         onnx_model.graph.value_info.extend(keep)
 
     return onnx_model
+
+
+def get_qdq_precisions(model: onnx.ModelProto) -> set:
+    """Gets the Q/DQ precision types present in the model.
+
+    Args:
+        model: Loaded in-memory onnx ModelProto.
+
+    Returns:
+        set: Set of Q/DQ precision types present in the model.
+    """
+    graph = gs.import_onnx(model)
+    precisions = set()
+
+    # Check for custom 'NVFP4' nodes
+    custom_fp4_q_nodes = [node for node in graph.nodes if node.op == "TRT_FP4DynamicQuantize"]
+    if custom_fp4_q_nodes:
+        precisions.add("float4_e2m1fn")
+
+    # Check for precision in DQ nodes
+    dq_nodes = [node for node in graph.nodes if node.op == "DequantizeLinear"]
+    for dq_node in dq_nodes:
+        if len(dq_node.inputs) == 3:
+            # If zero-point is set, return that as the quantization mode
+            precisions.add(dq_node.inputs[-1].values.dtype.name)
+        elif isinstance(dq_node.inputs[0], Constant):
+            # Else, return the ndde's input precision (ex: 'NVFP4' weight quantization)
+            precisions.add(dq_node.inputs[0].values.dtype.name)
+
+    return precisions

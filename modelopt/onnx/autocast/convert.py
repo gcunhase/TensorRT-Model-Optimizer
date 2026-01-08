@@ -23,6 +23,8 @@ reduced precision on the rest of the nodes. AutoCast automatically injects cast 
 nodes.
 """
 
+import platform
+
 import numpy as np
 import onnx
 
@@ -212,9 +214,18 @@ def convert_to_f16(
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
 
     # Opset 21 is needed for NVFP4 quantization support (DQ with 'block_size' attribute)
+    quantize_modes = onnx_utils.get_qdq_precisions(model)
+    min_opset = 21
+    if platform.system() == "Windows":
+        if "float4_e2m1fn" in quantize_modes:
+            logger.warning(
+                "Conversion may fail due to issue with 'NVFP4' precision on Windows. See ADD_LINK."
+            )
+        min_opset = 20
+
     sanitizer = GraphSanitizer(
         model,
-        min_opset=21,
+        min_opset=min_opset,
         trt_plugins=trt_plugins,
         max_ir_version=LATEST_IR_VERSION_SUPPORTED_BY_ORT,
     )
