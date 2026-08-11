@@ -36,6 +36,12 @@ import numpy as np
 import onnx
 
 from modelopt.onnx.logging_config import logger
+from modelopt.onnx.op_types import (
+    get_activation_ops,
+    is_default_quantizable_op_by_ort,
+    is_fusible_reduction_op,
+    is_normalization_op,
+)
 from modelopt.onnx.quantization.ort_utils import create_inference_session
 from modelopt.onnx.quantization.quantize import quantize
 from modelopt.onnx.quantization.sensitivity.metrics import cos_dist, kl_div, mse
@@ -75,6 +81,30 @@ _METRIC_FUNCS: dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
 # Fixed seed for the synthetic-random calibration fallback so that repeated invocations produce
 # identical inputs and, therefore, comparable rankings within one machine.
 _SYNTHETIC_SEED = 0
+
+
+def _default_op_types_scope(onnx_model: onnx.ModelProto) -> set[str]:
+    """Return op types worth probing by default: present in the graph AND known-quantizable.
+
+    Intersects the set of op types actually present in the graph with the union of ORT's default
+    quantizable ops, activation ops, normalization ops, and fusible reduction ops. Skips graph
+    plumbing (``Cast`` / ``Constant`` / ``Shape`` / ...) that isn't on any of those lists,
+    which would produce zero-drift probes and waste wall-clock.
+
+    Args:
+        onnx_model: Loaded ONNX model to enumerate.
+
+    Returns:
+        Set of op-type strings to probe.
+    """
+    activation_ops = get_activation_ops()
+    return {
+        op for op in get_op_types_in_graph(onnx_model)
+        if is_default_quantizable_op_by_ort(op)
+        or op in activation_ops
+        or is_normalization_op(op)
+        or is_fusible_reduction_op(op)
+    }
 
 
 def score(
@@ -124,12 +154,15 @@ def score(
         calibration_eps: ONNXRuntime execution providers to use for both the reference and the
             per-target forward passes, and for calibration inside :func:`quantize`. Same schema as
             the ``--calibration_eps`` CLI flag.
-        op_types_scope: Optional whitelist of op types to probe. If omitted, every unique op type
-            actually present in ``onnx_path`` is probed. Op types the underlying
-            :func:`modelopt.onnx.quantization.quantize` cannot quantize (graph plumbing like
-            ``Cast`` or ``Reshape``) produce zero-drift probes and are reported with score
-            ``0.0`` -- the CLI hides them from the pretty-printed table by default but they
-            still appear in the JSON output.
+        op_types_scope: Optional whitelist of op types to probe. If omitted, defaults to the
+            intersection of ops present in ``onnx_path`` and the union of ORT's default
+            quantizable set, activation ops, normalization ops, and fusible reduction ops
+            (see :func:`_default_op_types_scope`). Graph plumbing (``Cast`` / ``Constant`` /
+            ``Shape`` / ...) is skipped by default because it produces zero-drift probes.
+            Ops that slip past the filter but that the underlying
+            :func:`modelopt.onnx.quantization.quantize` still cannot quantize are reported
+            with score ``0.0`` -- the CLI hides those from the pretty-printed table by
+            default but they always appear in the JSON output.
         work_dir: Directory to place intermediate per-target quantized ONNX files. Defaults to a
             fresh temporary directory that is removed after the call returns.
 
@@ -170,7 +203,7 @@ def score(
     )
 
     quantizable_ops = (
-        set(op_types_scope) if op_types_scope else get_op_types_in_graph(onnx_model)
+        set(op_types_scope) if op_types_scope else _default_op_types_scope(onnx_model)
     )
     if granularity == Granularity.OP_TYPE.value:
         targets = _enumerate_op_type_targets(onnx_model, quantizable_ops)

@@ -146,10 +146,12 @@ Supported options
 - ``calibration_data``: sequence of input-dicts, path to real data (``.npy`` / ``.npz`` /
   directory), or ``None`` to fall back to synthetic random tensors (directional-only; see note
   below).
-- ``op_types_scope``: optional whitelist of op types to probe. If omitted, every unique op type
-  actually present in the ONNX graph is probed -- unquantizable ops (``Cast`` / ``Reshape`` /
-  ``Shape`` / ...) produce zero-drift entries that the CLI hides by default (pass
-  ``--show_zero_scores`` to see them; they always appear in the JSON).
+- ``op_types_scope``: optional whitelist of op types to probe. If omitted, defaults to the
+  intersection of ops actually present in the graph and the union of ORT's default quantizable
+  set, activation ops, normalization ops, and fusible reduction ops. Graph plumbing (``Cast`` /
+  ``Constant`` / ``Shape`` / ...) is skipped so wall-clock is not wasted on zero-drift probes.
+  Any ops that slip past the filter but still produce zero drift are hidden from the CLI table
+  by default (pass ``--show_zero_scores`` to see them; they always appear in the JSON).
 
 Python API:
 
