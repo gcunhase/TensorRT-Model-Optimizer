@@ -39,7 +39,7 @@ from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.ort_utils import create_inference_session
 from modelopt.onnx.quantization.quantize import quantize
 from modelopt.onnx.quantization.sensitivity.metrics import cos_dist, kl_div, mse
-from modelopt.onnx.utils import gen_random_inputs, get_input_names
+from modelopt.onnx.utils import gen_random_inputs, get_input_names, get_op_types_in_graph
 
 __all__ = ["CalibrationSource", "Granularity", "Metric", "score"]
 
@@ -75,24 +75,6 @@ _METRIC_FUNCS: dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
 # Fixed seed for the synthetic-random calibration fallback so that repeated invocations produce
 # identical inputs and, therefore, comparable rankings within one machine.
 _SYNTHETIC_SEED = 0
-
-
-def _op_types_present_in_graph(onnx_model: onnx.ModelProto) -> set[str]:
-    """Return the set of unique op types that appear as nodes in the graph.
-
-    The default sensitivity scan iterates over this set. If the underlying
-    :func:`modelopt.onnx.quantization.quantize` cannot quantize a given op type (e.g., graph
-    plumbing like ``Cast``, ``Reshape``, ``Shape``), the resulting probe simply emits no Q/DQ
-    nodes and the drift score is ``0.0`` -- a legitimate signal that the op contributes nothing
-    to quantization accuracy loss.
-
-    Args:
-        onnx_model: Loaded ONNX model to enumerate.
-
-    Returns:
-        Set of unique op-type strings appearing in ``onnx_model.graph.node``.
-    """
-    return {node.op_type for node in onnx_model.graph.node if node.op_type}
 
 
 def score(
@@ -188,7 +170,7 @@ def score(
     )
 
     quantizable_ops = (
-        set(op_types_scope) if op_types_scope else _op_types_present_in_graph(onnx_model)
+        set(op_types_scope) if op_types_scope else get_op_types_in_graph(onnx_model)
     )
     if granularity == Granularity.OP_TYPE.value:
         targets = _enumerate_op_type_targets(onnx_model, quantizable_ops)
