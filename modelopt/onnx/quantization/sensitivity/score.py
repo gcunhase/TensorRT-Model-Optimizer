@@ -78,6 +78,37 @@ _METRIC_FUNCS: dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
 _SYNTHETIC_SEED = 0
 
 
+# Accuracy-relevant op types that autotune's latency-driven set omits. Normalization and non-linear
+# activations rarely reshape trtexec's kernel choice, so they are absent from the latency search,
+# but under INT8 they are common accuracy-loss culprits (LayerNorm and Sigmoid on hybrid CNN +
+# Transformer architectures being the CoAtNet-family failure mode). Including them here means the
+# default scan surfaces them without callers having to know to widen op_types_scope by hand.
+_ACCURACY_EXTRA_OP_TYPES = frozenset({
+    "LayerNormalization",
+    "Sigmoid",
+    "Softmax",
+    "GELU",
+    "HardSigmoid",
+    "HardSwish",
+    "Tanh",
+    "ReduceMean",
+})
+
+
+def _default_sensitivity_op_types() -> set[str]:
+    """Return the default set of op types scanned when ``op_types_scope`` is omitted.
+
+    The default is autotune's canonical quantizable set widened with the accuracy-relevant
+    normalization / activation ops in :data:`_ACCURACY_EXTRA_OP_TYPES`. Callers who want the
+    strict autotune (latency-only) set can pass ``op_types_scope=get_autotuner_quantizable_ops()``
+    explicitly.
+
+    Returns:
+        Union of ``get_autotuner_quantizable_ops()`` and :data:`_ACCURACY_EXTRA_OP_TYPES`.
+    """
+    return set(get_autotuner_quantizable_ops()) | set(_ACCURACY_EXTRA_OP_TYPES)
+
+
 def score(
     onnx_path: str,
     calibration_data: (
@@ -125,9 +156,13 @@ def score(
         calibration_eps: ONNXRuntime execution providers to use for both the reference and the
             per-target forward passes, and for calibration inside :func:`quantize`. Same schema as
             the ``--calibration_eps`` CLI flag.
-        op_types_scope: Optional whitelist of op types considered quantizable. If omitted, uses the
-            canonical set from
-            :func:`modelopt.onnx.quantization.autotune.insertion_points.get_autotuner_quantizable_ops`.
+        op_types_scope: Optional whitelist of op types considered quantizable. If omitted, uses
+            an accuracy-tuned superset of autotune's latency-driven
+            :func:`~modelopt.onnx.quantization.autotune.insertion_points.get_autotuner_quantizable_ops`
+            that additionally includes normalization and non-linear activations
+            (``LayerNormalization``, ``Sigmoid``, ``Softmax``, ``GELU``, ``HardSigmoid``,
+            ``HardSwish``, ``Tanh``, ``ReduceMean``), which are common accuracy-loss culprits
+            under INT8 but do not surface in a pure-latency search.
         work_dir: Directory to place intermediate per-target quantized ONNX files. Defaults to a
             fresh temporary directory that is removed after the call returns.
 
@@ -167,7 +202,9 @@ def score(
         f"target_precision={target_precision}"
     )
 
-    quantizable_ops = set(op_types_scope) if op_types_scope else get_autotuner_quantizable_ops()
+    quantizable_ops = (
+        set(op_types_scope) if op_types_scope else _default_sensitivity_op_types()
+    )
     if granularity == Granularity.OP_TYPE.value:
         targets = _enumerate_op_type_targets(onnx_model, quantizable_ops)
     else:

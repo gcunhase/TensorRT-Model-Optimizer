@@ -199,5 +199,7 @@ Rendered ranking (CoAtNet-0, real calibration)::
     that hides real-input MHA quantization pathology. The ``calibration_source`` field of the
     output JSON records which mode was used.
 
-The per-node granularity uses the existing ``--nodes_to_quantize <regex>`` flag on the main
-quantize CLI to isolate one node per probe.
+In per-node granularity the scanner iterates over every quantizable node in the graph and runs
+one probe per node; each probe uses the existing ``--nodes_to_quantize <regex>`` flag on the main
+quantize CLI to quantize that node alone (everything else stays FP16) so the resulting output
+drift attributes to that specific node.

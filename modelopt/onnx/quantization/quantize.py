@@ -434,10 +434,8 @@ def quantize(
             List of op types to exclude from FP16 conversion.
             This is only relevant if '--high_precision_dtype != fp32'.
         nodes_to_quantize:
-            List of node names or regex patterns to quantize. If None (default), all supported
-            nodes are quantized. Symmetric with ``nodes_to_exclude``; when both are supplied,
-            exclude wins on conflict. The ONNX sensitivity scanner uses this flag to isolate a
-            single node for Q/DQ insertion in per-node mode.
+            List of node names to quantize. If None (default), all supported nodes are quantized.
+            This flag supports regular expression.
         nodes_to_exclude:
             List of node names to exclude from quantization. This flag supports regular expression.
         use_external_data_format:
