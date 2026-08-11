@@ -354,7 +354,7 @@ def _enumerate_node_targets(
         if node.op_type not in quantizable_ops or not node.name:
             continue
         regex = f"^{re.escape(node.name)}$"
-        targets.append((node.name, {"nodes_to_include": [regex]}))
+        targets.append((node.name, {"nodes_to_quantize": [regex]}))
     return targets
 
 

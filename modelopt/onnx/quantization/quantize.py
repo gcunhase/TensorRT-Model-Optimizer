@@ -359,7 +359,6 @@ def quantize(
     op_types_to_exclude: list[str] | None = None,
     op_types_to_exclude_fp16: list[str] | None = None,
     nodes_to_quantize: list[str] | None = None,
-    nodes_to_include: list[str] | None = None,
     nodes_to_exclude: list[str] | None = None,
     use_external_data_format: bool = False,
     keep_intermediate_files: bool = False,
@@ -435,16 +434,10 @@ def quantize(
             List of op types to exclude from FP16 conversion.
             This is only relevant if '--high_precision_dtype != fp32'.
         nodes_to_quantize:
-            List of node names to quantize. If None (default), all supported nodes are quantized.
-            This flag supports regular expression.
-        nodes_to_include:
-            List of node name patterns whose matching nodes must be quantized. Symmetric mirror of
-            ``nodes_to_exclude``: patterns are treated as regular expressions and, when provided,
-            restrict quantization to nodes whose names match at least one pattern. Internally these
-            patterns are merged into ``nodes_to_quantize`` before graph traversal, so both flags can
-            be used together to compose an explicit list with additional inclusion patterns. This is
-            the primitive used by the ONNX sensitivity scanner to isolate a single node for Q/DQ
-            insertion.
+            List of node names or regex patterns to quantize. If None (default), all supported
+            nodes are quantized. Symmetric with ``nodes_to_exclude``; when both are supplied,
+            exclude wins on conflict. The ONNX sensitivity scanner uses this flag to isolate a
+            single node for Q/DQ insertion in per-node mode.
         nodes_to_exclude:
             List of node names to exclude from quantization. This flag supports regular expression.
         use_external_data_format:
@@ -661,12 +654,6 @@ def quantize(
             )
 
     nodes_to_quantize = list(nodes_to_quantize or [])
-    if nodes_to_include:
-        # Symmetric mirror of nodes_to_exclude. Regex patterns are handled uniformly by
-        # graph_utils.expand_node_names_from_patterns() further down the pipeline, so merging into
-        # nodes_to_quantize here is sufficient to have both explicit names and inclusion patterns
-        # take effect together.
-        nodes_to_quantize.extend(nodes_to_include)
     nodes_to_exclude = nodes_to_exclude or []
 
     # Check op types spelling in 'op_types_to_exclude' and '_to_quantize'

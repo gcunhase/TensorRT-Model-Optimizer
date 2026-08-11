@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the ``nodes_to_include`` filter added alongside ``nodes_to_exclude``.
+"""Tests for the ``nodes_to_quantize`` allow-list filter (symmetric with ``nodes_to_exclude``).
 
-Builds a small two-Conv ONNX graph and asserts that ``nodes_to_include=["conv_keep"]`` produces
+Builds a small two-Conv ONNX graph and asserts that ``nodes_to_quantize=["conv_keep"]`` produces
 Q/DQ around ``conv_keep`` only, leaving ``conv_skip`` in its original precision. This is the
 primitive the ONNX sensitivity scanner relies on to isolate a single node for a per-target probe.
 """
@@ -66,7 +66,7 @@ def _build_two_conv_onnx(path: str, opset: int = 17) -> None:
     ]
     graph = helper.make_graph(
         nodes=nodes,
-        name="nodes_to_include_test",
+        name="nodes_to_quantize_test",
         inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, 8, 8])],
         outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4, 8, 8])],
         initializer=initializers,
@@ -88,8 +88,8 @@ def _has_dq_predecessor(node: gs.Node, input_idx: int) -> bool:
     return bool(producer and producer.op == "DequantizeLinear")
 
 
-def test_nodes_to_include_restricts_qdq_to_single_conv(tmp_path):
-    """`nodes_to_include=["conv_keep"]` inserts Q/DQ around conv_keep only."""
+def test_nodes_to_quantize_restricts_qdq_to_single_conv(tmp_path):
+    """`nodes_to_quantize=["conv_keep"]` inserts Q/DQ around conv_keep only."""
     onnx_path = str(tmp_path / "two_conv.onnx")
     _build_two_conv_onnx(onnx_path)
     calibration_data = {"input": np.random.default_rng(0).standard_normal((2, 3, 8, 8)).astype(np.float32)}
@@ -99,7 +99,7 @@ def test_nodes_to_include_restricts_qdq_to_single_conv(tmp_path):
         quantize_mode="int8",
         calibration_data=calibration_data,
         calibration_eps=["cpu"],
-        nodes_to_include=["^conv_keep$"],
+        nodes_to_quantize=["^conv_keep$"],
         high_precision_dtype="fp32",
     )
 
@@ -114,8 +114,8 @@ def test_nodes_to_include_restricts_qdq_to_single_conv(tmp_path):
 
     # conv_keep must have DQ on its activation input; conv_skip must not.
     assert _has_dq_predecessor(keep_nodes[0], 0), (
-        "conv_keep is not quantized despite nodes_to_include=['conv_keep']"
+        "conv_keep is not quantized despite nodes_to_quantize=['conv_keep']"
     )
     assert not _has_dq_predecessor(skip_nodes[0], 0), (
-        "conv_skip was quantized but nodes_to_include only listed conv_keep"
+        "conv_skip was quantized but nodes_to_quantize only listed conv_keep"
     )
