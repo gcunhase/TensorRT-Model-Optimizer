@@ -36,7 +36,6 @@ import numpy as np
 import onnx
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.autotune.insertion_points import get_autotuner_quantizable_ops
 from modelopt.onnx.quantization.ort_utils import create_inference_session
 from modelopt.onnx.quantization.quantize import quantize
 from modelopt.onnx.quantization.sensitivity.metrics import cos_dist, kl_div, mse
@@ -78,35 +77,22 @@ _METRIC_FUNCS: dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
 _SYNTHETIC_SEED = 0
 
 
-# Accuracy-relevant op types that autotune's latency-driven set omits. Normalization and non-linear
-# activations rarely reshape trtexec's kernel choice, so they are absent from the latency search,
-# but under INT8 they are common accuracy-loss culprits (LayerNorm and Sigmoid on hybrid CNN +
-# Transformer architectures being the CoAtNet-family failure mode). Including them here means the
-# default scan surfaces them without callers having to know to widen op_types_scope by hand.
-_ACCURACY_EXTRA_OP_TYPES = frozenset({
-    "LayerNormalization",
-    "Sigmoid",
-    "Softmax",
-    "GELU",
-    "HardSigmoid",
-    "HardSwish",
-    "Tanh",
-    "ReduceMean",
-})
+def _op_types_present_in_graph(onnx_model: onnx.ModelProto) -> set[str]:
+    """Return the set of unique op types that appear as nodes in the graph.
 
+    The default sensitivity scan iterates over this set. If the underlying
+    :func:`modelopt.onnx.quantization.quantize` cannot quantize a given op type (e.g., graph
+    plumbing like ``Cast``, ``Reshape``, ``Shape``), the resulting probe simply emits no Q/DQ
+    nodes and the drift score is ``0.0`` -- a legitimate signal that the op contributes nothing
+    to quantization accuracy loss.
 
-def _default_sensitivity_op_types() -> set[str]:
-    """Return the default set of op types scanned when ``op_types_scope`` is omitted.
-
-    The default is autotune's canonical quantizable set widened with the accuracy-relevant
-    normalization / activation ops in :data:`_ACCURACY_EXTRA_OP_TYPES`. Callers who want the
-    strict autotune (latency-only) set can pass ``op_types_scope=get_autotuner_quantizable_ops()``
-    explicitly.
+    Args:
+        onnx_model: Loaded ONNX model to enumerate.
 
     Returns:
-        Union of ``get_autotuner_quantizable_ops()`` and :data:`_ACCURACY_EXTRA_OP_TYPES`.
+        Set of unique op-type strings appearing in ``onnx_model.graph.node``.
     """
-    return set(get_autotuner_quantizable_ops()) | set(_ACCURACY_EXTRA_OP_TYPES)
+    return {node.op_type for node in onnx_model.graph.node if node.op_type}
 
 
 def score(
@@ -156,13 +142,12 @@ def score(
         calibration_eps: ONNXRuntime execution providers to use for both the reference and the
             per-target forward passes, and for calibration inside :func:`quantize`. Same schema as
             the ``--calibration_eps`` CLI flag.
-        op_types_scope: Optional whitelist of op types considered quantizable. If omitted, uses
-            an accuracy-tuned superset of autotune's latency-driven
-            :func:`~modelopt.onnx.quantization.autotune.insertion_points.get_autotuner_quantizable_ops`
-            that additionally includes normalization and non-linear activations
-            (``LayerNormalization``, ``Sigmoid``, ``Softmax``, ``GELU``, ``HardSigmoid``,
-            ``HardSwish``, ``Tanh``, ``ReduceMean``), which are common accuracy-loss culprits
-            under INT8 but do not surface in a pure-latency search.
+        op_types_scope: Optional whitelist of op types to probe. If omitted, every unique op type
+            actually present in ``onnx_path`` is probed. Op types the underlying
+            :func:`modelopt.onnx.quantization.quantize` cannot quantize (graph plumbing like
+            ``Cast`` or ``Reshape``) produce zero-drift probes and are reported with score
+            ``0.0`` -- the CLI hides them from the pretty-printed table by default but they
+            still appear in the JSON output.
         work_dir: Directory to place intermediate per-target quantized ONNX files. Defaults to a
             fresh temporary directory that is removed after the call returns.
 
@@ -203,7 +188,7 @@ def score(
     )
 
     quantizable_ops = (
-        set(op_types_scope) if op_types_scope else _default_sensitivity_op_types()
+        set(op_types_scope) if op_types_scope else _op_types_present_in_graph(onnx_model)
     )
     if granularity == Granularity.OP_TYPE.value:
         targets = _enumerate_op_type_targets(onnx_model, quantizable_ops)

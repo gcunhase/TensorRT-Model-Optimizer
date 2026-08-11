@@ -66,14 +66,19 @@ def _load_calibration(path: str | None) -> str | dict | None:
     raise ValueError(f"Unsupported calibration_data_path: {path}")
 
 
-def _render_ranked_table(result: dict) -> str:
+def _render_ranked_table(result: dict, show_zero_scores: bool = False) -> str:
     """Format a sensitivity result as a two-column, high-to-low ranked table.
 
     Args:
         result: The return value of :func:`score`.
+        show_zero_scores: If False (default), hide targets whose drift score is exactly ``0.0``.
+            Such targets typically indicate op types the underlying quantize call skipped (graph
+            plumbing like ``Cast`` or ``Reshape``); their zero score is legitimate but noisy in
+            the ranked table. All scores -- including zeros -- always appear in the JSON output.
 
     Returns:
-        A newline-joined string with a header, one row per target, and highest / lowest markers.
+        A newline-joined string with a header, one row per non-hidden target, and highest / lowest
+        markers. A trailing footer notes the count of hidden zero-score rows when applicable.
     """
     scores = result["scores"]
     header = (
@@ -84,6 +89,15 @@ def _render_ranked_table(result: dict) -> str:
         return header + "\n  (no quantizable targets found)"
 
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    hidden = 0
+    if not show_zero_scores:
+        visible = [(n, v) for n, v in ranked if v != 0.0]
+        hidden = len(ranked) - len(visible)
+        ranked = visible
+
+    if not ranked:
+        return header + f"\n  (all {hidden} target(s) scored 0.0 -- pass --show_zero_scores to see them)"
+
     name_width = max(len(name) for name, _ in ranked)
     lines = [header]
     for i, (name, value) in enumerate(ranked):
@@ -93,6 +107,10 @@ def _render_ranked_table(result: dict) -> str:
         elif i == len(ranked) - 1:
             marker = "  <-- lowest impact"
         lines.append(f"  {name:<{name_width}}  {value:.3f}{marker}")
+    if hidden:
+        lines.append(
+            f"  ({hidden} target(s) with score 0.0 hidden; pass --show_zero_scores or read the JSON)"
+        )
     return "\n".join(lines)
 
 
@@ -165,8 +183,8 @@ def get_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=None,
         help=(
-            "Optional whitelist of op types considered quantizable. Defaults to the canonical set "
-            "from modelopt.onnx.quantization.autotune."
+            "Optional whitelist of op types to probe. Defaults to every unique op type actually "
+            "present in the ONNX graph."
         ),
     )
     parser.add_argument(
@@ -174,6 +192,14 @@ def get_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Where to write the sensitivity JSON. Defaults to <onnx_stem>.sensitivity.json.",
+    )
+    parser.add_argument(
+        "--show_zero_scores",
+        action="store_true",
+        help=(
+            "Include zero-drift targets (op types the underlying quantize call could not affect) "
+            "in the stderr ranked table. They always appear in the JSON regardless."
+        ),
     )
     return parser
 
@@ -219,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     with open(output_json, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
 
-    print(_render_ranked_table(result), file=sys.stderr)
+    print(_render_ranked_table(result, show_zero_scores=args.show_zero_scores), file=sys.stderr)
     print(f"Wrote {output_json}", file=sys.stderr)
     return 0
 
