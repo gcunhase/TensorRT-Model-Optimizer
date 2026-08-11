@@ -97,70 +97,6 @@ If the model contains custom ops, enable calibration with the TensorRT Execution
 By default, after running the calibration, the quantization tool will insert the QDQ nodes by following TensorRT friendly QDQ insertion algorithm. Users can change the default quantization behavior by tweaking the API params like op_types_to_quantize, op_types_to_exclude etc. See the :meth:`modelopt.onnx.quantization.quantize() <modelopt.onnx.quantization.quantize>` for details.
 
 
-Quantization Sensitivity Scan
-=============================
-
-For hybrid CNN + Transformer models it is often unclear which ops or nodes destroy accuracy when
-quantized. The :func:`modelopt.onnx.quantization.sensitivity.score` primitive ranks quantizable
-targets (op types or individual nodes) by the proxy metric between the FP16 reference and the per-
-target quantized activations, so a downstream picker can decide which ops to keep at higher
-precision. The primitive reuses :func:`modelopt.onnx.quantization.quantize` internally for each
-per-target probe, so scales are properly calibrated (not autotune's placement-only descriptors).
-
-Python API:
-
-.. code-block:: python
-
-    from modelopt.onnx.quantization.sensitivity import score
-
-    result = score(
-        onnx_path="coatnet-0.onnx",
-        calibration_data="imagenet_calib_500.npz",
-        granularity="op_type",  # or "node"
-        metric="kl_div",
-        target_precision="int8",
-    )
-    # result["scores"] is a dict {op_type_or_node_name: metric_value}, higher = more sensitive.
-
-Command line:
-
-.. code-block:: bash
-
-    # Op-type ranking with real calibration data (headline mode; ~2-3 min on CoAtNet-0)
-    python -m modelopt.onnx.quantization.sensitivity \
-        --onnx_path coatnet-0.onnx \
-        --calibration_data_path imagenet_calib_500.npz \
-        --granularity op_type
-
-    # Per-node ranking (deep dive; ~30-60 min on CoAtNet-0)
-    python -m modelopt.onnx.quantization.sensitivity \
-        --onnx_path coatnet-0.onnx \
-        --calibration_data_path imagenet_calib_500.npz \
-        --granularity node
-
-Rendered ranking (CoAtNet-0, real calibration)::
-
-    Sensitivity scan (int8 / kl_div / op_type):
-      LayerNormalization    0.402  <-- highest impact
-      Sigmoid               0.318
-      Mul                   0.271
-      MatMul                0.187
-      Add                   0.043
-      Conv                  0.012  <-- lowest impact
-    Wrote coatnet-0.sensitivity.json
-
-.. note::
-
-    Omitting ``--calibration_data_path`` falls back to synthetic random inputs. Absolute scores are
-    then directional-only and must not be paired with absolute thresholds -- attention-heavy models
-    are the highest-risk degradation case because random Q times K^T produces near-uniform softmax
-    that hides real-input MHA quantization pathology. The ``calibration_source`` field of the
-    output JSON records which mode was used.
-
-The per-node granularity depends on the ``--nodes_to_include <regex>`` filter added to the main
-quantize CLI; the same flag is available as a symmetric mirror of ``--nodes_to_exclude`` for any
-future single-node inspection workflow.
-
 Deploy Quantized ONNX Model
 ===========================
 
@@ -185,3 +121,84 @@ The following command will build the engine using fp16 precision. After building
 .. note::
 
     If you replace ``--fp16`` flag with ``--best`` flag, this command will create an int8 engine with TensorRT's implicit quantization.
+
+Quantization Sensitivity Scan
+=============================
+
+For hybrid CNN + Transformer models it is often unclear which ops or nodes destroy accuracy when
+quantized. The :func:`modelopt.onnx.quantization.sensitivity.score` primitive ranks quantizable
+targets (op types or individual nodes) by the proxy metric between the FP16 reference and the per-
+target quantized activations, so a downstream picker can decide which ops to keep at higher
+precision. The primitive reuses :func:`modelopt.onnx.quantization.quantize` internally for each
+per-target probe, so scales are properly calibrated (not autotune's placement-only descriptors).
+
+Supported options
+-----------------
+
+- ``granularity``: ``op_type`` (default; probes each quantizable op type once, ~10-15 probes) or
+  ``node`` (probes each ONNX node individually, N_nodes probes; slower but per-instance).
+- ``metric``: ``kl_div`` (default; softmax-normalized KL divergence — recommended), ``mse``
+  (raw mean squared error; cheaper but scale-sensitive) or ``cos`` (``1 - cosine_similarity``;
+  scale-invariant, robust to activation magnitude variance).
+- ``target_precision``: ``int8`` (default) or ``fp8``.
+- ``calibration_method``: passed through to the underlying quantize call — ``entropy`` (default),
+  ``max``, ``mse``, ``percentile``, etc.
+- ``calibration_data``: sequence of input-dicts, path to real data (``.npy`` / ``.npz`` /
+  directory), or ``None`` to fall back to synthetic random tensors (directional-only; see note
+  below).
+
+Python API:
+
+.. code-block:: python
+
+    from modelopt.onnx.quantization.sensitivity import score
+
+    result = score(
+        onnx_path="coatnet-0.onnx",
+        calibration_data="imagenet_calib_500.npz",
+        granularity="op_type",  # or "node"
+        metric="kl_div",        # or "mse" or "cos"
+        target_precision="int8",
+    )
+    # result["scores"] is a dict {op_type_or_node_name: metric_value}, higher = more sensitive.
+
+Command line:
+
+.. code-block:: bash
+
+    # Op-type ranking with real calibration data (headline mode; ~2-3 min on CoAtNet-0)
+    python -m modelopt.onnx.quantization.sensitivity \
+        --onnx_path coatnet-0.onnx \
+        --calibration_data_path imagenet_calib_500.npz \
+        --granularity op_type \
+        --metric kl_div
+
+    # Per-node ranking (deep dive; ~30-60 min on CoAtNet-0)
+    python -m modelopt.onnx.quantization.sensitivity \
+        --onnx_path coatnet-0.onnx \
+        --calibration_data_path imagenet_calib_500.npz \
+        --granularity node \
+        --metric kl_div
+
+Rendered ranking (CoAtNet-0, real calibration)::
+
+    Sensitivity scan (int8 / kl_div / op_type):
+      LayerNormalization    0.402  <-- highest impact
+      Sigmoid               0.318
+      Mul                   0.271
+      MatMul                0.187
+      Add                   0.043
+      Conv                  0.012  <-- lowest impact
+    Wrote coatnet-0.sensitivity.json
+
+.. note::
+
+    Omitting ``--calibration_data_path`` falls back to synthetic random inputs. Absolute scores are
+    then directional-only and must not be paired with absolute thresholds -- attention-heavy models
+    are the highest-risk degradation case because random Q times K^T produces near-uniform softmax
+    that hides real-input MHA quantization pathology. The ``calibration_source`` field of the
+    output JSON records which mode was used.
+
+The per-node granularity depends on the ``--nodes_to_include <regex>`` filter added to the main
+quantize CLI; the same flag is available as a symmetric mirror of ``--nodes_to_exclude`` for any
+future single-node inspection workflow.
