@@ -204,6 +204,15 @@ def get_parser() -> argparse.ArgumentParser:
         help="A space-separated list of node names to quantize. Regular expressions are supported.",
     )
     argparser.add_argument(
+        "--nodes_to_include",
+        type=str,
+        nargs="+",
+        help=(
+            "A space-separated list of node name patterns whose matching nodes must be quantized. "
+            "Symmetric mirror of --nodes_to_exclude. Regular expressions are supported."
+        ),
+    )
+    argparser.add_argument(
         "--nodes_to_exclude",
         type=str,
         nargs="+",
@@ -537,6 +546,7 @@ def main():
         op_types_to_exclude=args.op_types_to_exclude,
         op_types_to_exclude_fp16=args.op_types_to_exclude_fp16,
         nodes_to_quantize=args.nodes_to_quantize,
+        nodes_to_include=args.nodes_to_include,
         nodes_to_exclude=args.nodes_to_exclude,
         use_external_data_format=args.use_external_data_format,
         keep_intermediate_files=args.keep_intermediate_files,
