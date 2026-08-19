@@ -125,12 +125,18 @@ The following command will build the engine using fp16 precision. After building
 Quantization Sensitivity Scan
 =============================
 
-For hybrid CNN + Transformer models it is often unclear which ops or nodes destroy accuracy when
-quantized. The :func:`modelopt.onnx.quantization.sensitivity.score` primitive ranks quantizable
-targets (op types or individual nodes) by the proxy metric between the FP16 reference and the per-
-target quantized activations, so a downstream picker can decide which ops to keep at higher
-precision. The primitive reuses :func:`modelopt.onnx.quantization.quantize` internally for each
-per-target probe, so scales are properly calibrated (not autotune's placement-only descriptors).
+Post-training quantization of any ONNX model often runs into the same friction: it is unclear
+which ops or nodes destroy accuracy at INT8/FP8, and practitioners iterate through hand-crafted
+exclusion policies until they find one that works. The
+:func:`modelopt.onnx.quantization.sensitivity.score` primitive automates that investigation for
+any ONNX model with a calibration dataset. It ranks quantizable targets (op types or individual
+nodes) by a proxy metric between the reference and per-target quantized activations, so a
+downstream picker can decide which ops to keep at higher precision. Works across CNN,
+Transformer, and hybrid architectures alike -- the ranking reflects each model's own
+precision-sensitive pathways (residual paths, normalization boundaries, SE gating, attention
+projections, etc.) without any architecture-specific configuration. The primitive reuses
+:func:`modelopt.onnx.quantization.quantize` internally for each per-target probe, so scales are
+properly calibrated (not autotune's placement-only descriptors).
 
 Supported options
 -----------------
@@ -168,6 +174,30 @@ Python API:
     )
     # result["scores"] is a dict {op_type_or_node_name: metric_value}, higher = more sensitive.
 
+The ``imagenet_calib_500.npz`` in the example above is a 500-sample ImageNet-1k calibration set
+prepared with the same preprocessing as the exported ONNX. For a CoAtNet-0 checkpoint exported
+from timm's ``coatnet_0_rw_224.sw_in1k`` (``pretrained=True``), that dump looks like:
+
+.. code-block:: python
+
+    import numpy as np, onnx, timm
+    from datasets import load_dataset
+    from timm.data import resolve_model_data_config, create_transform
+
+    m = onnx.load("coatnet-0.onnx")
+    input_name = m.graph.input[0].name
+    model = timm.create_model("coatnet_0_rw_224.sw_in1k", pretrained=True)
+    tfm = create_transform(**resolve_model_data_config(model), is_training=False)
+    ds = load_dataset("ILSVRC/imagenet-1k", split="validation", streaming=True)
+    samples = [tfm(ex["image"].convert("RGB")).numpy()
+               for i, ex in enumerate(ds) if i < 500]
+    np.savez("imagenet_calib_500.npz",
+             **{input_name: np.stack(samples).astype(np.float32)})
+
+Use the analogous timm handle for any other model family (``resnet50``, ``mobilenetv3_large_100``,
+``vit_base_patch16_224``, ...); the ``resolve_model_data_config`` +``create_transform`` pair keeps
+preprocessing consistent with the exported ONNX regardless of architecture.
+
 Command line:
 
 .. code-block:: bash
@@ -186,15 +216,23 @@ Command line:
         --granularity node \
         --metric kl_div
 
-Rendered ranking (CoAtNet-0, real calibration)::
+Rendered ranking (CoAtNet-0, real 500-sample ImageNet calibration)::
 
     Sensitivity scan (int8 / kl_div / op_type):
-      LayerNormalization    0.402  <-- highest impact
-      Sigmoid               0.318
-      Mul                   0.271
-      MatMul                0.187
-      Add                   0.043
-      Conv                  0.012  <-- lowest impact
+      Add                 2.848  <-- highest impact
+      Mul                 1.890
+      LayerNormalization  1.653
+      ReduceMean          1.570
+      BatchNormalization  0.355
+      Conv                0.181
+      AveragePool         0.057
+      Sigmoid             0.039
+      MatMul              0.015
+      Relu               ~0
+      Softmax            ~0
+      GlobalAveragePool  ~0
+      Gemm                0     <-- lowest impact
+      (1 target(s) with score 0.0 hidden; pass --show_zero_scores or read the JSON)
     Wrote coatnet-0.sensitivity.json
 
 .. note::
