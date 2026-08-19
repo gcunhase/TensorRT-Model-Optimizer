@@ -38,6 +38,7 @@ import onnx
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.op_types import (
     get_activation_ops,
+    is_copy_op,
     is_default_quantizable_op_by_ort,
     is_fusible_reduction_op,
     is_normalization_op,
@@ -87,9 +88,13 @@ def _default_op_types_scope(onnx_model: onnx.ModelProto) -> set[str]:
     """Return op types worth probing by default: present in the graph AND known-quantizable.
 
     Intersects the set of op types actually present in the graph with the union of ORT's default
-    quantizable ops, activation ops, normalization ops, and fusible reduction ops. Skips graph
-    plumbing (``Cast`` / ``Constant`` / ``Shape`` / ...) that isn't on any of those lists,
-    which would produce zero-drift probes and waste wall-clock.
+    quantizable ops, activation ops, normalization ops, and fusible reduction ops. Layout / copy
+    ops (``Transpose`` / ``Reshape`` / ``Concat`` / ...) are then excluded via
+    :func:`is_copy_op` -- they show up in ORT's default quantizable set but their sensitivity
+    signal reflects Q/DQ insertion at data-movement boundaries rather than any INT8-kernel
+    trade-off, and TensorRT never actually produces INT8 kernels for them, so ranking them
+    clutters the output with "don't do this anyway" entries. Graph plumbing (``Cast`` /
+    ``Constant`` / ``Shape`` / ...) not on any of the above lists is also skipped.
 
     Args:
         onnx_model: Loaded ONNX model to enumerate.
@@ -100,10 +105,13 @@ def _default_op_types_scope(onnx_model: onnx.ModelProto) -> set[str]:
     activation_ops = get_activation_ops()
     return {
         op for op in get_op_types_in_graph(onnx_model)
-        if is_default_quantizable_op_by_ort(op)
-        or op in activation_ops
-        or is_normalization_op(op)
-        or is_fusible_reduction_op(op)
+        if (
+            is_default_quantizable_op_by_ort(op)
+            or op in activation_ops
+            or is_normalization_op(op)
+            or is_fusible_reduction_op(op)
+        )
+        and not is_copy_op(op)
     }
 
 
