@@ -176,18 +176,28 @@ Python API:
 
 The ``imagenet_calib_500.npz`` in the example above is a 500-sample ImageNet-1k calibration set
 prepared with the same preprocessing as the exported ONNX. For a CoAtNet-0 checkpoint exported
-from timm's ``coatnet_0_rw_224.sw_in1k`` (``pretrained=True``), that dump looks like:
+from timm's ``coatnet_0_rw_224.sw_in1k`` (``pretrained=True``), the code looks like:
 
 .. code-block:: python
 
-    import numpy as np, onnx, timm
+    import numpy as np, onnx, timm, torch
     from datasets import load_dataset
     from timm.data import resolve_model_data_config, create_transform
 
+    # 1. Export the timm checkpoint to ONNX.
+    model = timm.create_model("coatnet_0_rw_224.sw_in1k", pretrained=True).eval()
+    cfg = resolve_model_data_config(model)
+    dummy = torch.randn(1, *cfg["input_size"])   # (1, 3, 224, 224)
+    torch.onnx.export(
+        model, dummy, "coatnet-0.onnx",
+        input_names=["input"], output_names=["output"],
+        opset_version=17,
+    )
+
+    # 2. Prepare the calibration NPZ with matching preprocessing.
     m = onnx.load("coatnet-0.onnx")
     input_name = m.graph.input[0].name
-    model = timm.create_model("coatnet_0_rw_224.sw_in1k", pretrained=True)
-    tfm = create_transform(**resolve_model_data_config(model), is_training=False)
+    tfm = create_transform(**cfg, is_training=False)
     ds = load_dataset("ILSVRC/imagenet-1k", split="validation", streaming=True)
     samples = [tfm(ex["image"].convert("RGB")).numpy()
                for i, ex in enumerate(ds) if i < 500]
