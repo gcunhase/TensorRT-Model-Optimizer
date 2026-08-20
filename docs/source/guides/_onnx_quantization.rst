@@ -138,6 +138,8 @@ projections, etc.) without any architecture-specific configuration. The primitiv
 :func:`modelopt.onnx.quantization.quantize` internally for each per-target probe, so scales are
 properly calibrated (not autotune's placement-only descriptors).
 
+.. _sensitivity-supported-options:
+
 Supported options
 -----------------
 
@@ -212,14 +214,14 @@ Command line:
 
 .. code-block:: bash
 
-    # Op-type ranking with real calibration data (headline mode; ~2-3 min on CoAtNet-0)
+    # Op-type ranking with real calibration data (one probe per op class; ~14 min on CoAtNet-0)
     python -m modelopt.onnx.quantization.sensitivity \
         --onnx_path coatnet-0.onnx \
         --calibration_data_path imagenet_calib_500.npz \
         --granularity op_type \
         --metric kl_div
 
-    # Per-node ranking (deep dive; ~30-60 min on CoAtNet-0)
+    # Per-node ranking with real calibration data (one probe per quantizable node; ~60 min on CoAtNet-0)
     python -m modelopt.onnx.quantization.sensitivity \
         --onnx_path coatnet-0.onnx \
         --calibration_data_path imagenet_calib_500.npz \
@@ -257,3 +259,72 @@ In per-node granularity the scanner iterates over every quantizable node in the 
 one probe per node; each probe uses the existing ``--nodes_to_quantize <regex>`` flag on the main
 quantize CLI to quantize that node alone (everything else stays FP16) so the resulting output
 drift attributes to that specific node.
+
+Turning scores into an exclusion list
+-------------------------------------
+
+The :func:`sensitivity.score` output is a dictionary from target name to sensitivity score
+(see ``metric`` in :ref:`sensitivity-supported-options` above). The picker
+function :func:`sensitivity.suggest_exclusion` turns that dictionary into an actionable
+``--nodes_to_exclude`` list for :func:`modelopt.onnx.quantization.quantize`, and
+:func:`sensitivity.summarize_exclusion` reports what the exclusion set covers.
+
+Two policy modes are supported:
+
+- **Coverage mode** (default): return the largest node set whose cumulative sensitivity
+  score stays at or below ``coverage * total_mass``. The actual coverage is always less
+  than or equal to the requested value ("at most X%"). Architecture-portable because the
+  target is a fraction, not an absolute number -- ``coverage=0.90`` means the same thing
+  on any model regardless of sensitivity score magnitudes.
+- **Threshold mode**: return every node whose individual sensitivity score exceeds
+  ``threshold`` (no cumulative-mass logic). Simpler and more predictable when the
+  operator already knows the per-node sensitivity score magnitude that separates
+  "quantize safely" from "keep at higher precision" for a specific model. Per-node
+  sensitivity score magnitudes are not portable across models. When ``threshold`` is
+  set, ``coverage`` is ignored.
+
+Python API -- coverage mode:
+
+.. code-block:: python
+
+    from modelopt.onnx.quantization import quantize
+    from modelopt.onnx.quantization.sensitivity import (
+        score, suggest_exclusion, summarize_exclusion,
+    )
+
+    result = score(
+        onnx_path="coatnet-0.onnx",
+        calibration_data="imagenet_calib_500.npz",
+        granularity="node",
+    )
+
+    # Leave at most 90% of the total sensitivity score mass at FP16; quantize the rest.
+    excluded = suggest_exclusion(result["scores"], coverage=0.90)
+
+    quantize(
+        onnx_path="coatnet-0.onnx",
+        quantize_mode="int8",
+        calibration_data="imagenet_calib_500.npz",
+        nodes_to_exclude=excluded,
+        output_path="coatnet-0.quant.onnx",
+    )
+
+Python API -- threshold mode:
+
+.. code-block:: python
+
+    # The threshold value is determined empirically by looking at the per-node sensitivity scores.
+    # For CoAtNet-0, a threshold of 0.02 captures the load-bearing sensitivity
+    # (roughly the top 25 nodes as per the KL scores, ~89% of total mass).
+    excluded = suggest_exclusion(result["scores"], threshold=0.02)
+
+.. note::
+
+    The picker emits a ``logger.warning`` when the boundary between included and
+    excluded nodes is a near-tie -- specifically, if the first-excluded node's sensitivity
+    score is at least 99% of the last-included node's sensitivity score. In that case two
+    nodes with nearly
+    equivalent sensitivity end up in different precisions (one FP16, one INT8), which
+    can produce intra-group precision fragmentation. The warning suggests a slightly
+    larger ``coverage`` (or smaller ``threshold``) to include the near-tied node. Set
+    ``near_tie_ratio=None`` to disable the warning entirely.
