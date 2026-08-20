@@ -266,8 +266,12 @@ Turning scores into an exclusion list
 The :func:`sensitivity.score` output is a dictionary from target name to sensitivity score
 (see ``metric`` in :ref:`sensitivity-supported-options` above). The picker
 function :func:`sensitivity.suggest_exclusion` turns that dictionary into an actionable
-``--nodes_to_exclude`` list for :func:`modelopt.onnx.quantization.quantize`, and
-:func:`sensitivity.summarize_exclusion` reports what the exclusion set covers.
+``--nodes_to_exclude`` or ``--op_types_to_exclude`` list, depending on granularity, for
+:func:`modelopt.onnx.quantization.quantize`, and :func:`sensitivity.summarize_exclusion`
+reports what the exclusion set covers.
+
+In the rest of this documentation, we'll assume ``per-node`` granularity for simplicity,
+but the same logic goes for ``per-op-type`` granularity.
 
 Two policy modes are supported:
 

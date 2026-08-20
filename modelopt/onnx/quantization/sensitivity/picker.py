@@ -16,16 +16,17 @@
 """Exclusion picker for the sensitivity primitive.
 
 Turns a per-node or per-op-type score dictionary produced by :func:`sensitivity.score`
-into an actionable ``--nodes_to_exclude`` list. Supports two policy modes:
+into an actionable ``--nodes_to_exclude`` or ``--op_types_to_exclude`` list (depending on
+granularity) for :func:`modelopt.onnx.quantization.quantize`. Supports two policy modes:
 
-* **Coverage mode** (default): pick the largest node set whose cumulative
+* **Coverage mode** (default): pick the largest target set whose cumulative
   sensitivity score stays at or below ``coverage * total_mass``. Portable
   across architectures because the target is a fraction, not an absolute
   number.
-* **Threshold mode**: exclude every node whose individual sensitivity score
-  exceeds an absolute cutoff. Simpler and more predictable when the operator
-  already knows what per-node sensitivity score magnitude they consider "too
-  sensitive to quantize" for a given model.
+* **Threshold mode**: exclude every target whose individual sensitivity
+  score exceeds an absolute cutoff. Simpler and more predictable when the
+  operator already knows what per-target sensitivity score magnitude they
+  consider "too sensitive to quantize" for a given model.
 """
 
 from __future__ import annotations
@@ -48,15 +49,15 @@ def suggest_exclusion(
 
     Two policy modes are supported:
 
-    * **Coverage mode** (the default): return the largest node set whose
+    * **Coverage mode** (the default): return the largest target set whose
       cumulative sensitivity score stays at or below ``coverage * total_mass``.
       Used when ``threshold`` is ``None``. The actual coverage will be less
-      than or equal to the requested value -- adding the next node in the
-      ranking would exceed the target, so the picker stops before crossing
-      it.
-    * **Threshold mode**: return every node whose sensitivity score exceeds
-      ``threshold``. Used when ``threshold`` is a float; ``coverage`` is
-      ignored in this mode.
+      than or equal to the requested value -- adding the next target in the
+      ranking would exceed the requested value, so the picker stops before
+      crossing it.
+    * **Threshold mode**: return every target whose sensitivity score
+      exceeds ``threshold``. Used when ``threshold`` is a float;
+      ``coverage`` is ignored in this mode.
 
     Coverage mode is architecture-portable (the target is a fraction of the
     model's total mass, so the same ``coverage`` value produces
@@ -66,7 +67,8 @@ def suggest_exclusion(
     for the specific model.
 
     Args:
-        scores: Per-node sensitivity scores from :func:`sensitivity.score` output.
+        scores: Per-target (node or op-type) sensitivity scores from
+            :func:`sensitivity.score` output.
         coverage: Fraction of total sensitivity score mass to leave unquantized (coverage
             mode only). Guidance:
 
@@ -86,13 +88,13 @@ def suggest_exclusion(
               cost of a wider accuracy gap versus the FP16 reference.
 
         threshold: Absolute sensitivity score cutoff (threshold mode). When
-            set, every node with individual sensitivity score strictly
+            set, every target with individual sensitivity score strictly
             greater than ``threshold`` is excluded from quantization;
             ``coverage`` is ignored. Set to ``None`` (default) to use
-            coverage mode. Guidance is model-dependent because per-node
+            coverage mode. Guidance is model-dependent because per-target
             sensitivity score magnitudes scale with model complexity: on
             ResNet-50 a value of ``0.005 - 0.02`` picks up
-            the load-bearing nodes; on CoAtNet-0 or larger models
+            the load-bearing targets; on CoAtNet-0 or larger models
             ``0.05 - 0.5`` is a similar magnitude in relative terms. Use
             coverage mode if you need portability across models.
         max_nodes: Optional cap on the exclusion set size. Prevents
@@ -100,30 +102,33 @@ def suggest_exclusion(
             exclusion sets that fragment the graph and hurt latency.
             Applied in both modes; whichever limit triggers first stops
             the accumulation.
-        min_score_floor: Nodes with individual score below this value are
+        min_score_floor: Targets with individual score below this value are
             never included, even if the coverage target has not been
-            reached (coverage mode) or the node exceeds ``threshold``
+            reached (coverage mode) or the target exceeds ``threshold``
             (threshold mode -- a defensive check).
-        near_tie_ratio: If the first-excluded node's sensitivity score is
-            at least this fraction of the last-included node's sensitivity
+        near_tie_ratio: If the first-excluded target's sensitivity score is
+            at least this fraction of the last-included target's sensitivity
             score, a warning is emitted via ``logger.warning`` recommending
             the operator consider a slightly larger coverage / smaller
             threshold to avoid intra-group precision fragmentation. Default
-            0.99 (warn when the first-excluded node's sensitivity score is
+            0.99 (warn when the first-excluded target's sensitivity score is
             within 1% of the last-included's). Set to ``None`` to disable
             the warning entirely.
 
     Returns:
-        List of node names (from ``scores`` keys), sorted from highest to
-        lowest sensitivity score. Pass this list directly to
-        ``modelopt.onnx.quantization.quantize(..., nodes_to_exclude=...)``.
+        List of target names (from ``scores`` keys), sorted from highest to
+        lowest sensitivity score. Pass to
+        ``modelopt.onnx.quantization.quantize(..., nodes_to_exclude=...)`` if
+        ``scores`` came from per-node granularity, or to
+        ``modelopt.onnx.quantization.quantize(..., op_types_to_exclude=...)``
+        if it came from per-op-type granularity.
     """
     ranked = sorted(scores.items(), key=lambda kv: -kv[1])
     if not ranked:
         return []
 
     if threshold is not None:
-        # Threshold mode: pick every node whose sensitivity score strictly
+        # Threshold mode: pick every target whose sensitivity score strictly
         # exceeds ``threshold``. Iteration order is highest-to-lowest score.
         excluded: list[str] = []
         for name, score in ranked:
@@ -135,10 +140,10 @@ def suggest_exclusion(
         _warn_near_tie(ranked, excluded, near_tie_ratio, mode="threshold")
         return excluded
 
-    # Coverage mode: pick the largest node set whose cumulative sensitivity
-    # score stays at or below ``coverage * total_mass``. Stops BEFORE crossing the target,
-    # so the actual coverage is <= requested. Guarantees the operator never
-    # gets more exclusion than they asked for.
+    # Coverage mode: pick the largest target set whose cumulative sensitivity
+    # score stays at or below ``coverage * total_mass``. Stops BEFORE crossing
+    # the requested value, so the actual coverage is <= requested. Guarantees
+    # the operator never gets more exclusion than they asked for.
     total = sum(scores.values())
     if total <= 0.0:
         return []
@@ -150,7 +155,7 @@ def suggest_exclusion(
         if score < min_score_floor:
             break
         if cumulative + score > target:
-            # Adding this node would exceed the requested coverage; stop.
+            # Adding this target would exceed the requested coverage; stop.
             break
         excluded.append(name)
         cumulative += score
@@ -169,13 +174,13 @@ def _warn_near_tie(
 ) -> None:
     """Emit a logger warning if the cut-off between included and excluded is a near-tie.
 
-    A near-tie means the first-excluded node's sensitivity score is at least
-    ``near_tie_ratio`` of the last-included node's sensitivity score. In that case, the two
-    nodes carry nearly equivalent sensitivity signal but end up in different
-    precisions (one FP16, one INT8), which can produce intra-group
-    fragmentation and unnecessary Cast overhead. The operator can widen the
-    coverage or lower the threshold to bring the near-tied node into the
-    exclusion set.
+    A near-tie means the first-excluded target's sensitivity score is at
+    least ``near_tie_ratio`` of the last-included target's sensitivity score.
+    In that case, the two targets carry nearly equivalent sensitivity signal
+    but end up in different precisions (one FP16, one INT8), which can
+    produce intra-group fragmentation and unnecessary Cast overhead. The
+    operator can widen the coverage or lower the threshold to bring the
+    near-tied target into the exclusion set.
     """
     if near_tie_ratio is None:
         return
@@ -191,11 +196,11 @@ def _warn_near_tie(
     last_included_name = ranked[len(excluded) - 1][0]
     logger.warning(
         f"suggest_exclusion (mode={mode}): near-tie at the exclusion cut-off. "
-        f"Last included node '{last_included_name}' has score={last_included_kl:.5f}, "
-        f"first excluded node '{first_excluded_name}' has score={first_excluded_kl:.5f} "
+        f"Last included target '{last_included_name}' has score={last_included_kl:.5f}, "
+        f"first excluded target '{first_excluded_name}' has score={first_excluded_kl:.5f} "
         f"({100.0 * ratio:.2f}% of last-included). "
         f"Consider a slightly larger coverage / smaller threshold to include the "
-        f"near-tied node and avoid intra-group precision fragmentation."
+        f"near-tied target and avoid intra-group precision fragmentation."
     )
 
 
@@ -209,8 +214,8 @@ def summarize_exclusion(
     before feeding the result into ``modelopt.onnx.quantization.quantize``.
 
     Args:
-        scores: The full per-node sensitivity scores.
-        excluded: The list of node names that will be excluded from
+        scores: The full per-target (node or op-type) sensitivity scores.
+        excluded: The list of target names that will be excluded from
             quantization.
 
     Returns:
@@ -218,15 +223,15 @@ def summarize_exclusion(
 
         * ``coverage_pct``: Percentage of total sensitivity score mass
           captured by the exclusion set.
-        * ``num_excluded``: Number of nodes to exclude from quantization.
-        * ``num_previously_quantized``: Total number of quantizable nodes
+        * ``num_excluded``: Number of targets to exclude from quantization.
+        * ``num_previously_quantized``: Total number of quantizable targets
           the primitive probed (i.e., what would have been quantized
           without the exclusion set).
-        * ``num_remaining_quantized``: How many nodes will still be
+        * ``num_remaining_quantized``: How many targets will still be
           quantized after the exclusion set is applied.
         * ``excluded_mass``: Absolute cumulative sensitivity score
           captured by the exclusion set.
-        * ``total_mass``: Sum of sensitivity scores across every probed node.
+        * ``total_mass``: Sum of sensitivity scores across every probed target.
     """
     total_mass = sum(scores.values())
     excluded_mass = sum(float(scores.get(name, 0.0)) for name in excluded)
